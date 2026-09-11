@@ -170,12 +170,12 @@ func keybindingTestModel() Model {
 		provider: local,
 		providers: []ProviderEntry{
 			{Key: "local", Name: "Local", Provider: local},
-			{Key: "yt", Name: "YouTube", Provider: commandsTestProvider{name: "YouTube"}},
+			{Key: "ytmusic", Name: "YouTube Music", Provider: commandsTestProvider{name: "YouTube Music"}},
 		},
 	}
 }
 
-func TestHandleKeyEnhancedShiftYSelectsYouTubeProvider(t *testing.T) {
+func TestHandleKeyEnhancedShiftYSelectsYouTubeMusicProvider(t *testing.T) {
 	m := keybindingTestModel()
 	msg := tea.KeyPressMsg{Code: 'y', ShiftedCode: 'Y', Mod: tea.ModShift}
 	if got := msg.String(); got != "shift+y" {
@@ -184,8 +184,8 @@ func TestHandleKeyEnhancedShiftYSelectsYouTubeProvider(t *testing.T) {
 
 	m.handleKey(msg)
 
-	if got := m.provider.Name(); got != "YouTube" {
-		t.Fatalf("active provider = %q, want YouTube", got)
+	if got := m.provider.Name(); got != "YouTube Music" {
+		t.Fatalf("active provider = %q, want YouTube Music", got)
 	}
 	if m.lyrics.visible {
 		t.Fatal("lyrics.visible = true after enhanced Shift+Y, want false")
@@ -782,8 +782,8 @@ func TestHandleKeyPreservesExistingLetterRepresentations(t *testing.T) {
 
 		m.handleKey(msg)
 
-		if got := m.provider.Name(); got != "YouTube" {
-			t.Fatalf("active provider = %q, want YouTube", got)
+		if got := m.provider.Name(); got != "YouTube Music" {
+			t.Fatalf("active provider = %q, want YouTube Music", got)
 		}
 	})
 }
