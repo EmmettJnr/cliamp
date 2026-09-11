@@ -23,7 +23,6 @@ import (
 	"github.com/bjarneo/cliamp/external/navidrome"
 	"github.com/bjarneo/cliamp/external/netease"
 	"github.com/bjarneo/cliamp/external/plex"
-	"github.com/bjarneo/cliamp/external/podcast"
 	"github.com/bjarneo/cliamp/external/qobuz"
 	"github.com/bjarneo/cliamp/external/radio"
 	"github.com/bjarneo/cliamp/external/radiometa"
@@ -117,19 +116,14 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 		applog.Info("cliamp starting (version=%s level=%s)", appmeta.Version(), appliedLevel)
 	}
 
-	// Public providers are always available; account providers register when configured.
-	radioProv := radio.New(radio.Options{
-		Country:     cfg.Radio.Country,
-		SaveCountry: config.SaveRadioCountry,
-	})
+	// Trimmed build: only local playlists and YouTube Music are registered.
+	// Upstream also registers Radio and Podcasts unconditionally here.
 	localProv := local.New()
 
 	var providers []model.ProviderEntry
-	providers = append(providers, model.ProviderEntry{Key: "radio", Name: "Radio", Provider: radioProv})
 	if localProv != nil {
 		providers = append(providers, model.ProviderEntry{Key: "local", Name: "Local", Provider: localProv})
 	}
-	providers = append(providers, model.ProviderEntry{Key: "podcast", Name: "Podcasts", Provider: podcast.New(cfg.Podcast.Country)})
 
 	var navClient *navidrome.NavidromeClient
 	if c := navidrome.NewFromConfig(cfg.Navidrome); c != nil {
@@ -263,24 +257,22 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 				}
 			}
 			if player.YTDLPAvailable() {
-				var all, video, music playlist.Provider
+				var music playlist.Provider
 				if explicitOAuth {
 					oauthProviders := ytmusic.New(nil, ytClientID, ytClientSecret, hasCookies)
-					all, video, music = oauthProviders.All, oauthProviders.Video, oauthProviders.Music
+					music = oauthProviders.Music
 					closeYouTube = oauthProviders.Music.Close
 				} else if hasCookies {
 					cookieProviders := ytmusic.NewCookieProviders(cfg.YouTubeMusic.CookiesFrom)
-					all, video, music = cookieProviders.All, cookieProviders.Video, cookieProviders.Music
+					music = cookieProviders.Music
 					closeYouTube = cookieProviders.Music.Close
 				} else if hasFallbackOAuth {
 					oauthProviders := ytmusic.New(nil, ytClientID, ytClientSecret, false)
-					all, video, music = oauthProviders.All, oauthProviders.Video, oauthProviders.Music
+					music = oauthProviders.Music
 					closeYouTube = oauthProviders.Music.Close
 				}
-				if all != nil {
+				if music != nil {
 					providers = append(providers,
-						model.ProviderEntry{Key: "yt", Name: "YouTube (All)", Provider: all},
-						model.ProviderEntry{Key: "youtube", Name: "YouTube", Provider: video},
 						model.ProviderEntry{Key: "ytmusic", Name: "YouTube Music", Provider: music},
 					)
 				}
@@ -324,7 +316,9 @@ func run(overrides config.Overrides, positional []string, daemon, visualizer60FP
 
 	defaultProvider := cfg.Provider
 	if defaultProvider == "" {
-		defaultProvider = "radio"
+		// Trimmed build: Radio is not registered, so default to local
+		// playlists instead of preloading the radio channel list.
+		defaultProvider = "local"
 	}
 	defaultRadio := len(positional) == 0 && defaultProvider == "radio"
 	resumeState := resume.Load()
