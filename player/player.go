@@ -50,6 +50,9 @@ type Player struct {
 	playing         atomic.Bool
 	paused          atomic.Bool
 	mono            atomic.Bool
+	fade            *fadeState    // transport fade envelope (pause/resume)
+	fadeGen         atomic.Uint64 // invalidates an in-flight fade when the transport moves on
+	fadePending     atomic.Bool   // a fade-out is running and the pause has not landed yet
 	resampleQuality int
 	bitDepth        int // 16 or 32
 	tapBufferFrames int
@@ -116,6 +119,7 @@ func New(q Quality) (*Player, error) {
 	}
 	p.volMin.Store(math.Float64bits(-50))
 	p.speed.Store(math.Float64bits(1.0))
+	p.fade = newFadeState()
 	p.gapless = &gaplessStreamer{}
 	// Suspend the speaker immediately; the ALSA audio callback goroutine
 	// burns ~2% CPU even on silence. Resume is called on every Play().
@@ -275,6 +279,8 @@ func (p *Player) playPipeline(tp *trackPipeline) error {
 }
 
 func (p *Player) playPipelineForGeneration(tp *trackPipeline, generation uint64) error {
+	p.cancelFade()
+	p.fade.set(1)
 	p.lifecycleMu.Lock()
 	if generation != 0 && p.playGen.Load() != generation {
 		p.lifecycleMu.Unlock()
@@ -329,7 +335,7 @@ func (p *Player) playPipelineForGeneration(tp *trackPipeline, generation uint64)
 		}
 
 		p.tap = newTap(s, p.tapBufferFrames, int(p.sr), p.speakerBufferFrames)
-		s = &volumeStreamer{s: p.tap, vol: &p.volume, mono: &p.mono, cachedDB: math.NaN()}
+		s = &volumeStreamer{s: p.tap, vol: &p.volume, mono: &p.mono, fade: p.fade, cachedDB: math.NaN()}
 		p.ctrl = &beep.Ctrl{Streamer: s}
 		p.started = true
 		p.current = tp
@@ -453,30 +459,94 @@ func (p *Player) GaplessAdvanced() bool {
 	return p.gaplessAdvance.CompareAndSwap(true, false)
 }
 
-// TogglePause toggles between paused and playing states.
-// When pausing, the speaker is suspended to save CPU; when unpausing
-// it is resumed so the audio callback drains the queued samples.
+// pauseFadeDuration is how long the transport fade takes in each direction.
+const pauseFadeDuration = 500 * time.Millisecond
+
+// cancelFade invalidates an in-flight fade so a pending suspend cannot land
+// after the transport has already moved on.
+func (p *Player) cancelFade() {
+	p.fadeGen.Add(1)
+	p.fadePending.Store(false)
+}
+
+// TogglePause toggles between paused and playing states, fading the audio
+// across pauseFadeDuration rather than cutting.
+//
+// Pausing is therefore asynchronous: the speaker has to keep pulling samples
+// for the length of the fade, so ctrl.Paused is set and the speaker suspended
+// only once the envelope reaches silence. IsPaused flips immediately so the UI
+// and IPC do not lag behind the keypress by half a second.
 func (p *Player) TogglePause() {
 	speaker.Lock()
-	if p.ctrl != nil {
-		p.ctrl.Paused = !p.ctrl.Paused
-		paused := p.ctrl.Paused
+	if p.ctrl == nil {
 		speaker.Unlock()
-		p.paused.Store(paused)
-		if paused {
-			p.suspendSpeaker()
-		} else {
-			p.resumeSpeaker()
-		}
-	} else {
-		speaker.Unlock()
+		return
 	}
+	hardPaused := p.ctrl.Paused
+	speaker.Unlock()
+
+	switch {
+	case !hardPaused && p.fadePending.Load():
+		// Un-pause during the fade-out: cancel the pending suspend and ramp
+		// back up from wherever the envelope got to.
+		p.cancelFade()
+		p.paused.Store(false)
+		p.fade.rampTo(1, pauseFadeDuration, int(p.sr))
+
+	case !hardPaused:
+		p.paused.Store(true)
+		p.fadePending.Store(true)
+		gen := p.fadeGen.Add(1)
+		p.fade.rampTo(0, pauseFadeDuration, int(p.sr))
+		go p.suspendAfterFade(gen)
+
+	default:
+		p.cancelFade()
+		p.fade.set(0)
+		speaker.Lock()
+		p.ctrl.Paused = false
+		speaker.Unlock()
+		p.paused.Store(false)
+		p.resumeSpeaker()
+		p.fade.rampTo(1, pauseFadeDuration, int(p.sr))
+	}
+}
+
+// suspendAfterFade waits for the fade-out to reach silence, then performs the
+// actual pause. It gives up if the transport moved on (gen changed) or if the
+// envelope never drains, which happens when the source stalls and the audio
+// callback stops pulling samples.
+func (p *Player) suspendAfterFade(gen uint64) {
+	deadline := time.Now().Add(pauseFadeDuration + 250*time.Millisecond)
+	for {
+		if p.fadeGen.Load() != gen {
+			return
+		}
+		if p.fade.silent() || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	speaker.Lock()
+	if p.fadeGen.Load() != gen {
+		speaker.Unlock()
+		return
+	}
+	if p.ctrl != nil {
+		p.ctrl.Paused = true
+	}
+	speaker.Unlock()
+	p.fadePending.Store(false)
+	p.suspendSpeaker()
 }
 
 // Stop halts playback and releases resources. The speaker is suspended so
 // the ALSA audio callback goroutine blocks (zero CPU) instead of streaming
 // silence. Resume is called automatically on the next Play().
 func (p *Player) Stop() {
+	p.cancelFade()
+	p.fade.set(1)
 	p.lifecycleMu.Lock()
 	p.mu.Lock()
 	active := p.current
