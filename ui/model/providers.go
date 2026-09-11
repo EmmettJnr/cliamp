@@ -199,7 +199,8 @@ func providerKeyForShortcut(key string) string {
 	case "B":
 		return "audiobookshelf"
 	case "Y":
-		return "yt"
+		// Trimmed build: the "yt" (YouTube All) entry is not registered.
+		return "ytmusic"
 	case "C":
 		return "soundcloud"
 	case "X":
